@@ -83,7 +83,8 @@ Tests: `tests/project2/test_dequant.cpp`, `tests/project2/test_quant_encode.cpp`
 5. **Packing, parameter semantics, edge shapes** (odd n, partial groups/bytes, n = 0) and argument
    validation (outputs untouched on every error).
 
-All of the above pass under GCC 13 (Release and ASan+UBSan Debug) and Clang 18 (Release).
+All of the above pass under GCC 13 (Release and ASan+UBSan Debug), Clang 18 (Release) and MSVC 2022
+(Release, CI; the `_Float16` cross-check is skipped there).
 
 ## 5. CUDA toolchain contract
 

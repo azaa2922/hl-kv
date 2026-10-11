@@ -22,8 +22,8 @@ docs/                 architecture specs, ADRs, dated experiment logs, project s
 
 ## Requirements
 
-* CMake ≥ 3.20 and a C++20 compiler. Verified locally: GCC 13.3, Clang 18.1 (Linux x86-64).
-  MSVC 2022 is configured and built by CI (`.github/workflows/ci.yml`) but has not been run locally.
+* CMake ≥ 3.20 and a C++20 compiler. Verified: GCC 13.3 and Clang 18.1 (Linux x86-64, locally and in
+  CI), MSVC 2022 `/W4 /WX` (Windows x64, CI only — `.github/workflows/ci.yml`).
 * GoogleTest and Google Benchmark: used from an installed package if found, otherwise fetched from
   GitHub at pinned commits (googletest v1.15.2, benchmark v1.9.1). Offline: pass
   `-DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=<dir> -DFETCHCONTENT_SOURCE_DIR_GOOGLEBENCHMARK=<dir>`.

@@ -32,8 +32,8 @@ P2 — FP32 targets; independent double-precision decode oracle; compiler `_Floa
 
 **Correctness Status:**
 67 unit tests pass on GCC 13 (Release; Debug+ASan+UBSan) and Clang 18 (Release); clang-tidy
-(bugprone/performance/analyzer) clean on library sources. MSVC build is configured but only verified
-by CI (`.github/workflows/ci.yml`), not locally.
+(bugprone/performance/analyzer) clean on library sources. CI (`.github/workflows/ci.yml`) builds with
+warnings-as-errors and passes all tests on Ubuntu (GCC, Clang, GCC+ASan/UBSan) and Windows (MSVC 2022).
 
 **Performance Status:**
 P1 measured on CPU only. P2 has no performance measurements (no GPU code).

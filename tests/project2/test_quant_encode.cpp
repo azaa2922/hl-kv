@@ -76,7 +76,8 @@ TEST_P(EncodeExhaustive, MidpointsRoundToEven) {
       const float m = s != 0 ? -mid : mid;
       EXPECT_EQ(c.encode(m), s | even) << c.name << " tie between 0x" << std::hex << lo;
       EXPECT_EQ(c.encode(std::nextafter(m, 0.0f)), s | lo) << c.name << " below 0x" << std::hex << lo;
-      const float away = std::nextafter(m, s != 0 ? -INFINITY : INFINITY);
+      const float inf = std::numeric_limits<float>::infinity();
+      const float away = std::nextafter(m, s != 0 ? -inf : inf);
       EXPECT_EQ(c.encode(away), s | hi) << c.name << " above 0x" << std::hex << lo;
     }
   }

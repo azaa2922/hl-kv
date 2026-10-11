@@ -1,0 +1,81 @@
+{
+  "version": 2,
+  "cmakeMinimumRequired": { "major": 3, "minor": 20, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": { "HLKV_WARNINGS_AS_ERRORS": "ON" }
+    },
+    {
+      "name": "linux-gcc-release",
+      "displayName": "Linux GCC Release",
+      "inherits": "base",
+      "generator": "Ninja",
+      "cacheVariables": { "CMAKE_CXX_COMPILER": "g++", "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "linux-clang-release",
+      "displayName": "Linux Clang Release",
+      "inherits": "base",
+      "generator": "Ninja",
+      "cacheVariables": { "CMAKE_CXX_COMPILER": "clang++", "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "linux-gcc-asan",
+      "displayName": "Linux GCC Debug + ASan/UBSan (tests only)",
+      "inherits": "base",
+      "generator": "Ninja",
+      "cacheVariables": {
+        "CMAKE_CXX_COMPILER": "g++",
+        "CMAKE_BUILD_TYPE": "Debug",
+        "HLKV_SANITIZE": "address,undefined",
+        "HLKV_BUILD_BENCHMARKS": "OFF"
+      }
+    },
+    {
+      "name": "linux-cuda",
+      "displayName": "Linux GCC Release + CUDA toolchain (requires CUDA 12+)",
+      "inherits": "linux-gcc-release",
+      "cacheVariables": { "HLKV_ENABLE_CUDA": "ON", "HLKV_CUDA_VERBOSE_PTXAS": "ON" }
+    },
+    {
+      "name": "windows-msvc",
+      "displayName": "Windows MSVC (Visual Studio 2022, x64)",
+      "inherits": "base",
+      "generator": "Visual Studio 17 2022",
+      "architecture": { "value": "x64", "strategy": "set" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "linux-gcc-release", "configurePreset": "linux-gcc-release" },
+    { "name": "linux-clang-release", "configurePreset": "linux-clang-release" },
+    { "name": "linux-gcc-asan", "configurePreset": "linux-gcc-asan" },
+    { "name": "linux-cuda", "configurePreset": "linux-cuda" },
+    { "name": "windows-msvc", "configurePreset": "windows-msvc", "configuration": "Release" }
+  ],
+  "testPresets": [
+    {
+      "name": "linux-gcc-release",
+      "configurePreset": "linux-gcc-release",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "linux-clang-release",
+      "configurePreset": "linux-clang-release",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "linux-gcc-asan",
+      "configurePreset": "linux-gcc-asan",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "windows-msvc",
+      "configurePreset": "windows-msvc",
+      "configuration": "Release",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}

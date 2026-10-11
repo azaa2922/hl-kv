@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: linux-${{ matrix.preset }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [linux-gcc-release, linux-clang-release, linux-gcc-asan]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }} --parallel
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }}
+      - name: Benchmark smoke run (not a measurement)
+        if: matrix.preset != 'linux-gcc-asan'
+        run: >
+          ./build/${{ matrix.preset }}/tests/hl_allocator_bench
+          --benchmark_min_time=0.01s
+          --benchmark_filter='/4096$|/64/64$|/64/128$'
+
+  windows-msvc:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake --preset windows-msvc
+      - name: Build
+        run: cmake --build --preset windows-msvc --parallel
+      - name: Test
+        run: ctest --preset windows-msvc
+      - name: Benchmark smoke run (not a measurement)
+        run: >
+          ./build/windows-msvc/tests/Release/hl_allocator_bench.exe
+          --benchmark_min_time=0.01s
+          --benchmark_filter='/4096$|/64/64$|/64/128$'

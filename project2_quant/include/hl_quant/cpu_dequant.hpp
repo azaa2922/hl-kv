@@ -40,4 +40,17 @@ namespace hl::quant {
                                                std::size_t group_size,
                                                std::span<float> out) noexcept;
 
+/// Reference for kernels that emit binary16: the binary32 value of
+/// dequantize_reference(), rounded to nearest-even binary16 (encode_fp16:
+/// overflow -> ±Inf, NaN -> quiet NaN). This is two roundings by definition
+/// (binary32 product, then binary16), which is what a GPU computing in fp32 and
+/// converting with __float2half_rn produces. Same requirements and errors as
+/// dequantize_reference(); `out` holds raw binary16 bit patterns.
+[[nodiscard]] QuantStatus dequantize_reference_to_fp16(QuantFormat format,
+                                                       std::span<const std::byte> packed,
+                                                       std::size_t num_elements,
+                                                       std::span<const AffineParams> params,
+                                                       std::size_t group_size,
+                                                       std::span<std::uint16_t> out) noexcept;
+
 }  // namespace hl::quant

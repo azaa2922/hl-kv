@@ -9,8 +9,9 @@
 //   LookupChain        dependent lookups: next id derived from the loaded record (latency)
 //   LookupBatch        validated gather of 1024 random blocks into a flat array
 //   BuildExecTable     CSR gather for a batch of sequences with scattered block ids
-//   DecodeStep         one decode step for S sequences (token append, seal, block
-//                      append, sequence turnover) + exec-table rebuild
+//   DecodeStep_*       one decode step for S sequences (token append, seal, block
+//                      append, sequence turnover), then either a full table
+//                      rebuild (FullRebuild) or the persistent delta protocol (Delta)
 //
 // Run:  hl_allocator_bench --benchmark_repetitions=5 --benchmark_report_aggregates_only=true
 
@@ -32,11 +33,14 @@ using hl::alloc::AllocRequest;
 using hl::alloc::BlockDescriptor;
 using hl::alloc::BlockExecDescriptor;
 using hl::alloc::BlockHandle;
+using hl::alloc::ExecDelta;
 using hl::alloc::ExecTable;
 using hl::alloc::FormatId;
 using hl::alloc::HeteroBlockTable;
+using hl::alloc::IdPatch;
 using hl::alloc::Result;
 using hl::alloc::SequenceHandle;
+using hl::alloc::SequenceSegment;
 using hl::alloc::Status;
 using hl::alloc::TableConfig;
 using hl::bench::HomogeneousBlockPool;
@@ -337,7 +341,7 @@ void BM_Baseline_BuildBlockTable(benchmark::State& state) {
   }
 
   std::vector<std::uint32_t> indptr;
-  std::vector<std::int32_t> indices;
+  std::vector<std::uint32_t> indices;
   for (auto _ : state) {
     p.build_block_table(batch, indptr, indices);
     benchmark::DoNotOptimize(indices.data());
@@ -345,7 +349,7 @@ void BM_Baseline_BuildBlockTable(benchmark::State& state) {
   }
   state.SetItemsProcessed(per_iteration(state, n));
   state.SetBytesProcessed(
-      per_iteration(state, n * sizeof(std::int32_t) + (seqs + 1) * sizeof(std::uint32_t)));
+      per_iteration(state, n * sizeof(std::uint32_t) + (seqs + 1) * sizeof(std::uint32_t)));
   state.counters["tokens_per_seq"] = static_cast<double>(blocks_per_seq) * kBlockTokens;
 }
 
@@ -354,14 +358,26 @@ void BM_Baseline_BuildBlockTable(benchmark::State& state) {
 // Each sequence has a target length (uniform in [1, max_blocks] blocks). Every
 // step appends one token to every sequence; a full block is sealed and a new
 // one appended; a sequence that reaches its target is released and replaced
-// (continuous batching). The exec table for all sequences is rebuilt each step.
+// (continuous batching). Then the per-step kernel input is produced either by
+//   FullRebuild: materializing the whole batch table (O(total blocks)), or
+//   Delta:       the persistent protocol — segment list (O(sequences)) plus
+//                patches for whatever changed during the step.
+// `upload_B_per_step` is the host->device payload that the step produces
+// (computed from the actual table / patch counts of the run).
+//
+// Warm-up: sequences start with one block and grow by one block every
+// kBlockTokens steps, so the untimed warm-up runs two maximum lifetimes
+// (2 * max_blocks * kBlockTokens steps) to reach the steady-state length
+// distribution before timing; `live_blocks` reports the table size at the end.
 struct SeqState {
   std::uint32_t target_blocks;
   std::uint32_t blocks;
   std::uint32_t tokens_in_last;
 };
 
-void BM_Hetero_DecodeStep(benchmark::State& state) {
+enum class StepMode { kFullRebuild, kDelta };
+
+void hetero_decode_step(benchmark::State& state, StepMode mode) {
   const auto num_seqs = static_cast<std::uint32_t>(state.range(0));
   const auto max_blocks = static_cast<std::uint32_t>(state.range(1));
   HeteroBlockTable t(make_config(num_seqs * max_blocks));
@@ -376,8 +392,7 @@ void BM_Hetero_DecodeStep(benchmark::State& state) {
   };
   for (std::uint32_t s = 0; s < num_seqs; ++s) start(s);
 
-  ExecTable table;
-  for (auto _ : state) {
+  auto step = [&] {
     for (std::uint32_t s = 0; s < num_seqs; ++s) {
       SeqState& q = st[s];
       must(t.set_valid_tokens(last[s], ++q.tokens_in_last));
@@ -392,15 +407,41 @@ void BM_Hetero_DecodeStep(benchmark::State& state) {
         q.tokens_in_last = 0;
       }
     }
-    must(t.build_exec_table(seqs, table));
-    benchmark::DoNotOptimize(table.blocks.data());
+  };
+  for (std::uint32_t i = 0; i < 2 * max_blocks * kBlockTokens; ++i) step();  // warm-up
+
+  ExecTable table;
+  ExecDelta delta;
+  std::vector<SequenceSegment> segments;
+  t.collect_delta(delta);  // initial upload happens once, outside the timed region
+  double upload_bytes = 0;
+  for (auto _ : state) {
+    step();
+    if (mode == StepMode::kFullRebuild) {
+      must(t.build_exec_table(seqs, table));
+      benchmark::DoNotOptimize(table.blocks.data());
+      upload_bytes += static_cast<double>(table.blocks.size() * sizeof(BlockExecDescriptor) +
+                                          table.indptr.size() * sizeof(std::uint32_t));
+    } else {
+      must(t.batch_segments(seqs, segments));
+      t.collect_delta(delta);
+      benchmark::DoNotOptimize(segments.data());
+      benchmark::DoNotOptimize(delta.descriptor_patches.data());
+      benchmark::DoNotOptimize(delta.id_patches.data());
+      upload_bytes += static_cast<double>(
+          delta.descriptor_patches.size() * sizeof(BlockExecDescriptor) +
+          delta.id_patches.size() * sizeof(IdPatch) + segments.size() * sizeof(SequenceSegment));
+    }
     benchmark::ClobberMemory();
   }
   state.SetItemsProcessed(per_iteration(state, num_seqs));
+  state.counters["upload_B_per_step"] =
+      benchmark::Counter(upload_bytes, benchmark::Counter::kAvgIterations);
+  state.counters["live_blocks"] = t.blocks_in_use();
   state.SetLabel("items = sequence-steps");
 }
 
-void BM_Baseline_DecodeStep(benchmark::State& state) {
+void baseline_decode_step(benchmark::State& state, StepMode mode) {
   const auto num_seqs = static_cast<std::uint32_t>(state.range(0));
   const auto max_blocks = static_cast<std::uint32_t>(state.range(1));
   HomogeneousBlockPool p(num_seqs * max_blocks);
@@ -416,8 +457,11 @@ void BM_Baseline_DecodeStep(benchmark::State& state) {
   for (std::uint32_t s = 0; s < num_seqs; ++s) start(s);
 
   std::vector<std::uint32_t> indptr;
-  std::vector<std::int32_t> indices;
-  for (auto _ : state) {
+  std::vector<std::uint32_t> indices;
+  std::vector<SequenceSegment> segments;
+  std::vector<IdPatch> patches;
+  std::vector<std::uint32_t> seq_lens(num_seqs);  // homogeneous kernels need lengths per step
+  auto step = [&] {
     for (std::uint32_t s = 0; s < num_seqs; ++s) {
       SeqState& q = st[s];
       if (++q.tokens_in_last < kBlockTokens) continue;
@@ -430,12 +474,52 @@ void BM_Baseline_DecodeStep(benchmark::State& state) {
         q.tokens_in_last = 0;
       }
     }
-    p.build_block_table(seqs, indptr, indices);
-    benchmark::DoNotOptimize(indices.data());
+  };
+  for (std::uint32_t i = 0; i < 2 * max_blocks * kBlockTokens; ++i) step();  // warm-up
+
+  p.collect_patches(patches);  // initial upload, outside the timed region
+  double upload_bytes = 0;
+  for (auto _ : state) {
+    step();
+    if (mode == StepMode::kFullRebuild) {
+      p.build_block_table(seqs, indptr, indices);
+      benchmark::DoNotOptimize(indices.data());
+      upload_bytes += static_cast<double>((indices.size() + indptr.size()) * sizeof(std::uint32_t));
+    } else {
+      p.batch_segments(seqs, segments);
+      p.collect_patches(patches);
+      for (std::uint32_t s = 0; s < num_seqs; ++s) {
+        seq_lens[s] = (st[s].blocks - 1) * kBlockTokens + st[s].tokens_in_last;
+      }
+      benchmark::DoNotOptimize(segments.data());
+      benchmark::DoNotOptimize(patches.data());
+      benchmark::DoNotOptimize(seq_lens.data());
+      upload_bytes += static_cast<double>(patches.size() * sizeof(IdPatch) +
+                                          segments.size() * sizeof(SequenceSegment) +
+                                          seq_lens.size() * sizeof(std::uint32_t));
+    }
     benchmark::ClobberMemory();
   }
   state.SetItemsProcessed(per_iteration(state, num_seqs));
+  state.counters["upload_B_per_step"] =
+      benchmark::Counter(upload_bytes, benchmark::Counter::kAvgIterations);
+  std::size_t live = 0;
+  for (const std::uint32_t s : seqs) live += p.sequence_length(s);
+  state.counters["live_blocks"] = static_cast<double>(live);
   state.SetLabel("items = sequence-steps");
+}
+
+void BM_Hetero_DecodeStep_FullRebuild(benchmark::State& state) {
+  hetero_decode_step(state, StepMode::kFullRebuild);
+}
+void BM_Hetero_DecodeStep_Delta(benchmark::State& state) {
+  hetero_decode_step(state, StepMode::kDelta);
+}
+void BM_Baseline_DecodeStep_FullRebuild(benchmark::State& state) {
+  baseline_decode_step(state, StepMode::kFullRebuild);
+}
+void BM_Baseline_DecodeStep_Delta(benchmark::State& state) {
+  baseline_decode_step(state, StepMode::kDelta);
 }
 
 // ---- registration -------------------------------------------------------------------------
@@ -451,7 +535,8 @@ void batch_shapes(benchmark::internal::Benchmark* b) {
 }
 
 void decode_shapes(benchmark::internal::Benchmark* b) {
-  b->Args({64, 128})->Args({256, 128})->Args({256, 512});
+  // {sequences, max blocks per sequence}: up to 2K / 8K / 32K tokens per sequence
+  b->Args({64, 128})->Args({256, 128})->Args({256, 512})->Args({256, 2048});
 }
 
 BENCHMARK(BM_Hetero_AllocReleaseChurn)->Apply(table_sizes);
@@ -464,8 +549,10 @@ BENCHMARK(BM_Hetero_LookupBatch)->Apply(table_sizes);
 BENCHMARK(BM_Baseline_LookupBatch)->Apply(table_sizes);
 BENCHMARK(BM_Hetero_BuildExecTable)->Apply(batch_shapes);
 BENCHMARK(BM_Baseline_BuildBlockTable)->Apply(batch_shapes);
-BENCHMARK(BM_Hetero_DecodeStep)->Apply(decode_shapes);
-BENCHMARK(BM_Baseline_DecodeStep)->Apply(decode_shapes);
+BENCHMARK(BM_Hetero_DecodeStep_FullRebuild)->Apply(decode_shapes);
+BENCHMARK(BM_Hetero_DecodeStep_Delta)->Apply(decode_shapes);
+BENCHMARK(BM_Baseline_DecodeStep_FullRebuild)->Apply(decode_shapes);
+BENCHMARK(BM_Baseline_DecodeStep_Delta)->Apply(decode_shapes);
 
 }  // namespace
 

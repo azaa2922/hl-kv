@@ -8,6 +8,7 @@ const char* to_string(QuantStatus status) noexcept {
     case QuantStatus::kInvalidArgument: return "invalid argument";
     case QuantStatus::kBufferTooSmall: return "buffer too small";
     case QuantStatus::kUnsupportedFormat: return "unsupported format";
+    case QuantStatus::kCudaError: return "CUDA error";
   }
   return "unknown status";
 }

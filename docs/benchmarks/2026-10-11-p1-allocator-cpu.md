@@ -1,5 +1,11 @@
 # Experiment log — P1 hl_allocator CPU microbenchmarks
 
+> **Erratum (2026-10-12).** The *Decode step* table below was measured before steady state: every
+> sequence started at one block and grows one block per 16 steps, so the table size depended on the
+> number of iterations run, and the full-rebuild cost at long contexts is understated. The harness
+> now warms up to steady state; see `2026-10-12-p1-persistent-exec-table-cpu.md`, which supersedes
+> those rows (it was measured on a different machine). The other tables are unaffected.
+
 | | |
 |---|---|
 | Date | 2026-10-11 |

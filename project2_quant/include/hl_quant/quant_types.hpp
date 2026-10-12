@@ -11,7 +11,6 @@
 //   FP8_E4M3    x = decode_e4m3(q) * scale               bias must be 0
 //   FP8_E5M2    x = decode_e5m2(q) * scale               bias must be 0
 //   INT4_PACKED x = fma(float(q), scale, bias)           q in [0, 15]
-//   INT2_PACKED x = fma(float(q), scale, bias)           q in [0, 3]
 //
 // All arithmetic is binary32 with round-to-nearest-even; the INT formats use a
 // single-rounding fused multiply-add so CPU and GPU (__fmaf_rn) results can be
@@ -21,10 +20,13 @@
 //
 // Packing (sub-byte formats), element i of a buffer:
 //   INT4: byte i/2, bits [4*(i%2), 4*(i%2)+3]   (element 2k in the low nibble)
-//   INT2: byte i/4, bits [2*(i%4), 2*(i%4)+1]   (element 4k in bits 0..1)
 // Groups must start on a byte boundary (group_size a multiple of the elements
 // per byte), so one packed byte never needs two parameter sets. Padding bits
 // in a trailing partial byte are written as zero and ignored on decode.
+//
+// Code 4 (formerly INT2_PACKED) is retired: INT2 was removed after the
+// 2026-10-11 reference-error measurement (ADR-0003). Do not reuse the code
+// without bumping the ABI version, so stale data cannot be misread.
 //
 // FP16 is stored little-endian (2 bytes/element). FP8 is one byte/element.
 
@@ -40,10 +42,11 @@ enum class QuantFormat : std::uint8_t {
   kFp8E4M3 = 1,     ///< OCP OFP8 E4M3 ("E4M3FN"): bias 7, no Inf, NaN = S.1111.111, max 448
   kFp8E5M2 = 2,     ///< OCP OFP8 E5M2: bias 15, IEEE-style Inf/NaN, max 57344
   kInt4Packed = 3,  ///< unsigned 4-bit codes, 2 per byte
-  kInt2Packed = 4,  ///< unsigned 2-bit codes, 4 per byte
+  // 4: retired (was INT2_PACKED), see ADR-0003
 };
 
-inline constexpr std::size_t kNumQuantFormats = 5;
+inline constexpr std::size_t kNumQuantFormats = 4;
+inline constexpr std::uint8_t kRetiredInt2Code = 4;
 static_assert(kNumQuantFormats <= 15, "format codes must fit hl_allocator's 4-bit FormatId");
 
 enum class ElementKind : std::uint8_t { kFloat, kUnsignedInt };
@@ -52,7 +55,8 @@ enum class QuantStatus : std::uint8_t {
   kOk = 0,
   kInvalidArgument,   ///< bad group size, parameter count, non-finite input/param, ...
   kBufferTooSmall,    ///< packed or output span shorter than required
-  kUnsupportedFormat, ///< value outside QuantFormat
+  kUnsupportedFormat, ///< value outside QuantFormat (or not supported by this entry point)
+  kCudaError,         ///< a CUDA runtime call failed (GPU entry points only)
 };
 
 [[nodiscard]] const char* to_string(QuantStatus status) noexcept;
@@ -93,8 +97,6 @@ struct FormatTraits {
       return {"FP8_E5M2", ElementKind::kFloat, 8, 5, 2, 15, true, true, false, 0x7Bu, 57344.0f};
     case QuantFormat::kInt4Packed:
       return {"INT4_PACKED", ElementKind::kUnsignedInt, 4, 0, 0, 0, false, true, true, 15u, 15.0f};
-    case QuantFormat::kInt2Packed:
-      return {"INT2_PACKED", ElementKind::kUnsignedInt, 2, 0, 0, 0, false, true, true, 3u, 3.0f};
   }
   return {"INVALID", ElementKind::kFloat, 0, 0, 0, 0, false, false, false, 0u, 0.0f};
 }

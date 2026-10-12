@@ -36,9 +36,9 @@
     },
     {
       "name": "linux-cuda",
-      "displayName": "Linux GCC Release + CUDA toolchain (requires CUDA 12+)",
+      "displayName": "Linux GCC Release + CUDA kernels (requires CUDA 12+)",
       "inherits": "linux-gcc-release",
-      "cacheVariables": { "HLKV_ENABLE_CUDA": "ON", "HLKV_CUDA_VERBOSE_PTXAS": "ON" }
+      "cacheVariables": { "HLKV_CUDA": "ON", "HLKV_CUDA_VERBOSE_PTXAS": "ON" }
     },
     {
       "name": "windows-msvc",
@@ -69,6 +69,11 @@
     {
       "name": "linux-gcc-asan",
       "configurePreset": "linux-gcc-asan",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "linux-cuda",
+      "configurePreset": "linux-cuda",
       "output": { "outputOnFailure": true }
     },
     {

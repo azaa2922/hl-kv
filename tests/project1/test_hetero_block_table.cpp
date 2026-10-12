@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <vector>
 
+#include "exec_mirror.hpp"
 #include "hl_allocator/hetero_block_table.hpp"
 
 namespace hl::alloc {
@@ -488,7 +489,188 @@ TEST(HeteroBlockTable, StatsReflectMixedPrecision) {
   EXPECT_EQ(st.payload_bytes_in_use, 4096u + 2048u + 1088u);
 }
 
-// ---- randomized invariants --------------------------------------------------------------
+// ---- persistent device state (delta protocol) ----------------------------------------
+
+using testing::ExecMirror;
+using testing::mirror_matches;
+
+bool non_executable(const BlockExecDescriptor& d) {
+  return d.format() == kInvalidFormat && d.slot == kNoSlot;
+}
+
+std::vector<BlockExecDescriptor> device_view(const HeteroBlockTable& t, SequenceHandle seq) {
+  std::vector<BlockExecDescriptor> out;
+  const std::span<const std::uint32_t> ids = t.sequence_block_ids(seq).value();
+  for (const std::uint32_t id : ids) out.push_back(t.device_descriptor(id));
+  return out;
+}
+
+TEST(HeteroBlockTableDelta, FirstDeltaInitializesTheWholeTable) {
+  HeteroBlockTable t(small_config());
+  ExecDelta delta;
+  t.collect_delta(delta);
+  EXPECT_EQ(delta.descriptor_table_size, 8u);
+  EXPECT_EQ(delta.arena_size, 0u);
+  EXPECT_TRUE(delta.id_patches.empty());
+  ASSERT_EQ(delta.descriptor_patches.size(), 8u);
+  for (std::uint32_t i = 0; i < 8; ++i) {
+    EXPECT_EQ(delta.descriptor_patches[i].block_id, i);
+    EXPECT_TRUE(non_executable(delta.descriptor_patches[i]));
+  }
+  ExecMirror mirror;
+  mirror.apply(delta);
+  EXPECT_TRUE(mirror_matches(mirror, t));
+
+  t.collect_delta(delta);  // nothing changed since
+  EXPECT_TRUE(delta.descriptor_patches.empty());
+  EXPECT_TRUE(delta.id_patches.empty());
+  expect_valid(t);
+}
+
+TEST(HeteroBlockTableDelta, OnlyChangedRecordsArePatched) {
+  HeteroBlockTable t(small_config());
+  ExecDelta delta;
+  t.collect_delta(delta);  // initial upload
+  const SequenceHandle s = t.create_sequence().value();
+  const BlockHandle b = t.append_block(s, req(kFp16, 1)).value();
+  ASSERT_EQ(t.set_valid_tokens(b, 2), Status::kOk);
+  ASSERT_EQ(t.set_valid_tokens(b, 3), Status::kOk);
+  EXPECT_EQ(t.pending_descriptor_patches(), 1u);  // deduplicated
+  EXPECT_EQ(t.pending_id_patches(), 1u);
+  t.collect_delta(delta);
+  ASSERT_EQ(delta.descriptor_patches.size(), 1u);
+  EXPECT_EQ(delta.descriptor_patches[0], t.lookup(b).value().exec);  // final value
+  EXPECT_EQ(delta.descriptor_patches[0].valid_tokens(), 3u);
+  ASSERT_EQ(delta.id_patches.size(), 1u);
+  EXPECT_EQ(delta.id_patches[0].block_id, b.id);
+
+  ASSERT_EQ(t.seal(b), Status::kOk);  // host-only state: no device change
+  t.collect_delta(delta);
+  EXPECT_TRUE(delta.descriptor_patches.empty());
+  EXPECT_TRUE(delta.id_patches.empty());
+}
+
+TEST(HeteroBlockTableDelta, NonResidentAndFreedBlocksBecomeNonExecutable) {
+  HeteroBlockTable t(small_config());
+  ExecMirror mirror;
+  ExecDelta delta;
+  const SequenceHandle s = t.create_sequence().value();
+  const BlockHandle a = t.append_block(s, req(kFp16, 16)).value();
+  const BlockHandle b = t.append_block(s, req(kInt4, 16)).value();
+  ASSERT_EQ(t.set_residency(b, Residency::kHost), Status::kOk);
+  t.collect_delta(delta);
+  mirror.apply(delta);
+  EXPECT_TRUE(mirror_matches(mirror, t));
+  EXPECT_TRUE(non_executable(mirror.table()[b.id]));
+  EXPECT_FALSE(non_executable(mirror.table()[a.id]));
+  // The materialized reference path refuses; the persistent path marks the record.
+  ExecTable table;
+  const std::vector<SequenceHandle> batch{s};
+  EXPECT_EQ(t.build_exec_table(batch, table), Status::kNotDeviceResident);
+  std::vector<SequenceSegment> segments;
+  ASSERT_EQ(t.batch_segments(batch, segments), Status::kOk);
+  EXPECT_EQ(mirror.read(segments[0]), device_view(t, s));
+
+  ASSERT_EQ(t.set_residency(b, Residency::kDevice), Status::kOk);
+  ASSERT_EQ(t.release_sequence(s), Status::kOk);
+  t.collect_delta(delta);
+  mirror.apply(delta);
+  EXPECT_TRUE(mirror_matches(mirror, t));
+  EXPECT_TRUE(non_executable(mirror.table()[a.id]));
+  EXPECT_TRUE(non_executable(mirror.table()[b.id]));
+}
+
+TEST(HeteroBlockTableDelta, SharedBlockChangeIsASinglePatch) {
+  HeteroBlockTable t(small_config(/*blocks=*/16, 8, 8, 8));
+  ExecMirror mirror;
+  ExecDelta delta;
+  std::vector<SequenceHandle> seqs;
+  for (int i = 0; i < 3; ++i) seqs.push_back(t.create_sequence().value());
+  const BlockHandle prefix = t.append_block(seqs[0], req(kFp16, 16)).value();
+  ASSERT_EQ(t.seal(prefix), Status::kOk);
+  ASSERT_EQ(t.append_shared_block(seqs[1], prefix), Status::kOk);
+  ASSERT_EQ(t.append_shared_block(seqs[2], prefix), Status::kOk);
+  for (const SequenceHandle s : seqs) ASSERT_TRUE(t.append_block(s, req(kFp8, 1)).ok());
+  t.collect_delta(delta);
+  mirror.apply(delta);
+
+  ASSERT_TRUE(t.begin_format_change(prefix, kInt4).ok());
+  ASSERT_EQ(t.commit_format_change(prefix, ScaleMode::kInlineF32, 0x3F80'0000u), Status::kOk);
+  t.collect_delta(delta);
+  EXPECT_EQ(delta.descriptor_patches.size(), 1u);  // one record, three readers
+  EXPECT_TRUE(delta.id_patches.empty());
+  mirror.apply(delta);
+
+  std::vector<SequenceSegment> segments;
+  ASSERT_EQ(t.batch_segments(seqs, segments), Status::kOk);
+  ExecTable reference;
+  ASSERT_EQ(t.build_exec_table(seqs, reference), Status::kOk);
+  const ExecTable seen = mirror.read_batch(segments);
+  EXPECT_EQ(seen.indptr, reference.indptr);
+  EXPECT_EQ(seen.blocks, reference.blocks);
+  for (std::size_t i = 0; i < 3; ++i) EXPECT_EQ(seen.blocks[2 * i].format(), kInt4);
+}
+
+TEST(HeteroBlockTableDelta, RelocationIsCarriedByIdPatches) {
+  TableConfig cfg = small_config(/*blocks=*/64, 64, 64, 64);
+  HeteroBlockTable t(cfg);
+  ExecMirror mirror;
+  ExecDelta delta;
+  const SequenceHandle a = t.create_sequence().value();
+  const SequenceHandle b = t.create_sequence().value();
+  for (int i = 0; i < 20; ++i) {  // a: 8 -> 16 -> 32 entries, interleaved with b
+    ASSERT_TRUE(t.append_block(a, req(kFp16, 16)).ok());
+    if (i % 4 == 0) {
+      ASSERT_TRUE(t.append_block(b, req(kFp8, 16)).ok());
+    }
+    if (i % 7 == 0) {  // apply some deltas mid-way, some batched
+      t.collect_delta(delta);
+      mirror.apply(delta);
+    }
+  }
+  t.collect_delta(delta);
+  mirror.apply(delta);
+  EXPECT_EQ(delta.arena_size, t.stats().arena_entries);
+  std::vector<SequenceSegment> segments;
+  const std::vector<SequenceHandle> batch{a, b};
+  ASSERT_EQ(t.batch_segments(batch, segments), Status::kOk);
+  EXPECT_EQ(segments[0].length, 20u);
+  EXPECT_EQ(mirror.read(segments[0]), device_view(t, a));
+  EXPECT_EQ(mirror.read(segments[1]), device_view(t, b));
+  expect_valid(t);
+}
+
+TEST(HeteroBlockTableDelta, BatchSegmentsValidatesHandles) {
+  HeteroBlockTable t(small_config());
+  const SequenceHandle s = t.create_sequence().value();
+  std::vector<SequenceSegment> segments{{1, 2}};
+  const std::vector<SequenceHandle> ok_batch{s};
+  ASSERT_EQ(t.batch_segments(ok_batch, segments), Status::kOk);
+  EXPECT_EQ(segments, (std::vector<SequenceSegment>{{0, 0}}));  // no storage yet
+  const std::vector<SequenceHandle> bad_batch{s, kInvalidSequence};
+  EXPECT_EQ(t.batch_segments(bad_batch, segments), Status::kInvalidHandle);
+  EXPECT_TRUE(segments.empty());
+}
+
+TEST(HeteroBlockTableDelta, StatsReportArenaAndPendingPatches) {
+  HeteroBlockTable t(small_config());
+  ExecDelta delta;
+  EXPECT_EQ(t.stats().pending_descriptor_patches, 8u);  // initial upload pending
+  t.collect_delta(delta);
+  const SequenceHandle s = t.create_sequence().value();
+  ASSERT_TRUE(t.append_block(s, req(kFp16, 4)).ok());
+  const TableStats st = t.stats();
+  EXPECT_EQ(st.arena_entries, IdArena::kMinSegment);
+  EXPECT_EQ(st.arena_live_entries, 1u);
+  EXPECT_EQ(st.arena_reserved_entries, IdArena::kMinSegment);
+  EXPECT_EQ(st.arena_free_entries, 0u);
+  EXPECT_EQ(st.pending_descriptor_patches, 1u);
+  EXPECT_EQ(st.pending_id_patches, 1u);
+  ASSERT_EQ(t.release_sequence(s), Status::kOk);
+  EXPECT_EQ(t.stats().arena_free_entries, IdArena::kMinSegment);
+}
+
+// ---- randomized invariants + differential check of the delta protocol ------------------
 
 TEST(HeteroBlockTableStress, RandomOperationsPreserveInvariants) {
   TableConfig cfg;
@@ -496,15 +678,25 @@ TEST(HeteroBlockTableStress, RandomOperationsPreserveInvariants) {
   cfg.block_tokens = 16;
   cfg.pools = {{kFp16, 4096, 48}, {kFp8, 2048, 48}, {kInt4, 1088, 64}};
   HeteroBlockTable t(cfg);
+  ExecMirror mirror;
+  ExecDelta delta;
 
   std::mt19937 rng(20261011);  // deterministic; only the engine (not distributions) is portable
   auto pick = [&](std::size_t n) { return static_cast<std::size_t>(rng() % n); };
   const std::array<FormatId, 3> formats{kFp16, kFp8, kInt4};
+  const std::array<Residency, 3> residencies{Residency::kDevice, Residency::kHost,
+                                             Residency::kDropped};
+  auto random_block = [&](const std::vector<SequenceHandle>& seqs) -> BlockHandle {
+    if (seqs.empty()) return kInvalidBlock;
+    const std::span<const std::uint32_t> ids = t.sequence_block_ids(seqs[pick(seqs.size())]).value();
+    return ids.empty() ? kInvalidBlock : t.handle_of(ids[pick(ids.size())]);
+  };
 
   std::vector<SequenceHandle> seqs;
   std::vector<BlockHandle> transcoding;
+  std::size_t comparisons = 0;
   for (int step = 0; step < 20000; ++step) {
-    switch (pick(8)) {
+    switch (pick(11)) {
       case 0:
         if (Result<SequenceHandle> s = t.create_sequence(); s.ok()) seqs.push_back(s.value());
         break;
@@ -515,25 +707,15 @@ TEST(HeteroBlockTableStress, RandomOperationsPreserveInvariants) {
         }
         break;
       case 3:  // share a random sealed block into another sequence
-        if (seqs.size() >= 2) {
-          const std::span<const std::uint32_t> ids =
-              t.sequence_block_ids(seqs[pick(seqs.size())]).value();
-          if (!ids.empty()) {
-            const BlockHandle h = t.handle_of(ids[pick(ids.size())]);
-            (void)t.seal(h);
-            (void)t.append_shared_block(seqs[pick(seqs.size())], h);
-          }
+        if (const BlockHandle h = random_block(seqs); h != kInvalidBlock) {
+          (void)t.seal(h);
+          (void)t.append_shared_block(seqs[pick(seqs.size())], h);
         }
         break;
       case 4:  // start a format change
-        if (!seqs.empty()) {
-          const std::span<const std::uint32_t> ids =
-              t.sequence_block_ids(seqs[pick(seqs.size())]).value();
-          if (!ids.empty()) {
-            const BlockHandle h = t.handle_of(ids[pick(ids.size())]);
-            (void)t.seal(h);
-            if (t.begin_format_change(h, formats[pick(3)]).ok()) transcoding.push_back(h);
-          }
+        if (const BlockHandle h = random_block(seqs); h != kInvalidBlock) {
+          (void)t.seal(h);
+          if (t.begin_format_change(h, formats[pick(3)]).ok()) transcoding.push_back(h);
         }
         break;
       case 5:  // finish a format change
@@ -543,6 +725,16 @@ TEST(HeteroBlockTableStress, RandomOperationsPreserveInvariants) {
                                         : t.abort_format_change(transcoding[i]);
           ASSERT_EQ(s, Status::kOk);
           transcoding.erase(transcoding.begin() + static_cast<std::ptrdiff_t>(i));
+        }
+        break;
+      case 6:  // offload / drop / restore
+        if (const BlockHandle h = random_block(seqs); h != kInvalidBlock) {
+          (void)t.set_residency(h, residencies[pick(3)]);
+        }
+        break;
+      case 7:  // token append or rollback on an open block
+        if (const BlockHandle h = random_block(seqs); h != kInvalidBlock) {
+          (void)t.set_valid_tokens(h, static_cast<std::uint32_t>(pick(17)));
         }
         break;
       default:  // release a sequence (may legitimately fail while transcoding)
@@ -558,7 +750,25 @@ TEST(HeteroBlockTableStress, RandomOperationsPreserveInvariants) {
       const ValidationReport rep = t.validate();
       ASSERT_TRUE(rep.ok()) << "step " << step << ": " << rep.message;
     }
+    if (pick(23) == 0) {  // irregular upload cadence: deltas accumulate across many ops
+      t.collect_delta(delta);
+      mirror.apply(delta);
+      ASSERT_TRUE(mirror_matches(mirror, t)) << "step " << step;
+      std::vector<SequenceSegment> segments;
+      ASSERT_EQ(t.batch_segments(seqs, segments), Status::kOk);
+      for (std::size_t i = 0; i < seqs.size(); ++i) {
+        ASSERT_EQ(mirror.read(segments[i]), device_view(t, seqs[i])) << "step " << step;
+      }
+      ExecTable reference;
+      if (t.build_exec_table(seqs, reference) == Status::kOk) {
+        const ExecTable seen = mirror.read_batch(segments);
+        ASSERT_EQ(seen.indptr, reference.indptr) << "step " << step;
+        ASSERT_EQ(seen.blocks, reference.blocks) << "step " << step;
+        ++comparisons;
+      }
+    }
   }
+  EXPECT_GT(comparisons, 10u);  // the full-rebuild oracle was exercised, not just skipped
 
   for (const BlockHandle h : transcoding) ASSERT_EQ(t.abort_format_change(h), Status::kOk);
   for (const SequenceHandle s : seqs) ASSERT_EQ(t.release_sequence(s), Status::kOk);
@@ -566,6 +776,9 @@ TEST(HeteroBlockTableStress, RandomOperationsPreserveInvariants) {
   EXPECT_EQ(t.free_slots(kFp16), 48u);
   EXPECT_EQ(t.free_slots(kFp8), 48u);
   EXPECT_EQ(t.free_slots(kInt4), 64u);
+  t.collect_delta(delta);
+  mirror.apply(delta);
+  EXPECT_TRUE(mirror_matches(mirror, t));
   expect_valid(t);
 }
 

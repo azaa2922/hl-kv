@@ -7,9 +7,10 @@
 //   BlockExecDescriptor (16 B, alignas(16))
 //     The device-facing part. It is exactly what an attention / dequant kernel
 //     needs to consume one KV block: where the payload lives (format + slot),
-//     how many tokens are valid, and how scales are found. Batch lookups copy
-//     these records verbatim into flat tables that are uploaded to the GPU, so
-//     one block costs one 128-bit load on the device.
+//     how many tokens are valid, and how scales are found. The device keeps a
+//     persistent table of these records indexed by block id (updated with
+//     self-addressed patches, see HeteroBlockTable::collect_delta), so one block
+//     costs one 128-bit load on the device.
 //
 //   BlockDescriptor (32 B, alignas(32))
 //     The host-side record held in HeteroBlockTable, indexed by block id. The
@@ -23,7 +24,7 @@
 // bit-fields: bit-field allocation order is implementation-defined and differs
 // between MSVC and GCC/Clang/NVCC, which would make the byte layout
 // compiler-dependent. The layout below is part of the ABI and is documented in
-// docs/architecture/hl_allocator_abi_v0.md.
+// docs/architecture/hl_allocator_abi.md.
 
 #include <bit>
 #include <cstddef>
@@ -36,7 +37,11 @@ static_assert(std::endian::native == std::endian::little,
               "HL-KV ABI v0 is defined for little-endian hosts (x86-64, AArch64); "
               "NVIDIA GPUs are little-endian as well.");
 
-inline constexpr std::uint32_t kAbiVersion = 0;
+/// v0: record layouts below. v1: unchanged record layouts, plus the persistent
+/// device-table protocol (descriptor table indexed by block id, per-sequence id
+/// arena, deltas) and the rule that a device record with format == kInvalidFormat
+/// is not executable. See docs/architecture/hl_allocator_abi.md.
+inline constexpr std::uint32_t kAbiVersion = 1;
 
 /// Opaque 4-bit storage-format code. The allocator never interprets it: it
 /// only selects which slot pool backs a block. The canonical code assignment

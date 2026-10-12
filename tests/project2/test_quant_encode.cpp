@@ -150,19 +150,15 @@ TEST(EncodeCrossCheck, Fp16MatchesCompilerFloat16) {
 // ---- quantize_reference ------------------------------------------------------------------
 
 TEST(QuantizeReference, PaddingBitsAreZero) {
-  const std::vector<float> x{0.0f, 1.0f, 2.0f};
+  const std::vector<float> x{0.0f, 7.0f, 15.0f};  // range 15 -> scale exactly 1
   std::vector<AffineParams> p(1);
   std::vector<std::byte> packed(2, std::byte{0xFF});
   ASSERT_EQ(quantize_reference(QuantFormat::kInt4Packed, x, 4, p, packed), QuantStatus::kOk);
-  EXPECT_EQ(std::to_integer<unsigned>(packed[1]) & 0xF0u, 0u);
-
-  const std::vector<float> y{0, 1, 2, 3, 3};
-  std::vector<std::byte> packed2(2, std::byte{0xFF});
-  ASSERT_EQ(quantize_reference(QuantFormat::kInt2Packed, y, 8, p, packed2), QuantStatus::kOk);
-  EXPECT_EQ(std::to_integer<unsigned>(packed2[0]), 0xE4u);  // codes 0,1,2,3
-  EXPECT_EQ(std::to_integer<unsigned>(packed2[1]), 0x03u);  // code 3 + zero padding
   EXPECT_EQ(p[0].scale, 1.0f);
   EXPECT_EQ(p[0].bias, 0.0f);
+  // Codes 0, 7, 15; the high nibble of byte 1 is zero padding.
+  EXPECT_EQ(std::to_integer<unsigned>(packed[0]), 0x70u);
+  EXPECT_EQ(std::to_integer<unsigned>(packed[1]), 0x0Fu);
 }
 
 TEST(QuantizeReference, Fp8ScaleIsAmaxOverMaxFinite) {
@@ -186,8 +182,7 @@ TEST(QuantizeReference, Fp8ScaleIsAmaxOverMaxFinite) {
 TEST(QuantizeReference, IsDeterministic) {
   std::vector<float> x(1000);
   for (std::size_t i = 0; i < x.size(); ++i) x[i] = std::sin(static_cast<float>(i)) * 7.0f;
-  for (const QuantFormat f : {QuantFormat::kFp8E4M3, QuantFormat::kInt4Packed,
-                              QuantFormat::kInt2Packed}) {
+  for (const QuantFormat f : {QuantFormat::kFp8E4M3, QuantFormat::kInt4Packed}) {
     std::vector<AffineParams> p1(num_groups(x.size(), 8)), p2(p1.size());
     std::vector<std::byte> b1(packed_bytes(f, x.size())), b2(b1.size());
     ASSERT_EQ(quantize_reference(f, x, 8, p1, b1), QuantStatus::kOk);
@@ -214,7 +209,7 @@ TEST(QuantizeReference, RejectsBadArgumentsWithoutWriting) {
   EXPECT_EQ(quantize_reference(QuantFormat::kFp8E4M3, with_inf, 4, p, packed),
             QuantStatus::kInvalidArgument);
   const std::vector<float> huge_range{-3e38f, 3e38f, 0.0f, 0.0f};  // max - min overflows
-  EXPECT_EQ(quantize_reference(QuantFormat::kInt2Packed, huge_range, 4, p, packed),
+  EXPECT_EQ(quantize_reference(QuantFormat::kInt4Packed, huge_range, 4, p, packed),
             QuantStatus::kInvalidArgument);
   const std::vector<float> ok{1.0f, 2.0f, 3.0f, 4.0f};
   EXPECT_EQ(quantize_reference(QuantFormat::kInt4Packed, ok, 2, p, packed),
@@ -222,6 +217,8 @@ TEST(QuantizeReference, RejectsBadArgumentsWithoutWriting) {
   EXPECT_EQ(quantize_reference(QuantFormat::kInt4Packed, ok, 4, p, std::span(packed).first(1)),
             QuantStatus::kBufferTooSmall);
   EXPECT_EQ(quantize_reference(static_cast<QuantFormat>(7), ok, 4, p, packed),
+            QuantStatus::kUnsupportedFormat);
+  EXPECT_EQ(quantize_reference(static_cast<QuantFormat>(kRetiredInt2Code), ok, 4, p, packed),
             QuantStatus::kUnsupportedFormat);
   EXPECT_TRUE(untouched());
 

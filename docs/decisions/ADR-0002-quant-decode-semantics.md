@@ -1,6 +1,7 @@
 # ADR-0002 — Quantized KV decode semantics (hl_quant v0)
 
-Date: 2026-10-11 · Status: accepted for the CPU reference; to be re-confirmed by the first GPU kernel
+Date: 2026-10-11 · Status: accepted for the CPU reference. Amended by ADR-0003 (INT2 removed) and
+ADR-0004 (first GPU kernel, FP8 → FP16)
 
 ## Decision
 

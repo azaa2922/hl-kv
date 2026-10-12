@@ -2,6 +2,7 @@
 
 add_library(hl_allocator
   src/hetero_block_table.cpp
+  src/id_arena.cpp
   src/status.cpp)
 add_library(hl::allocator ALIAS hl_allocator)
 

@@ -26,6 +26,7 @@ enum class Status : std::uint8_t {
   kNotDeviceResident,  ///< block cannot be handed to a kernel (residency != kDevice)
   kRefcountOverflow,   ///< refcount would exceed kMaxRefcount
   kCorrupt,            ///< validate() found an inconsistency
+  kCapacityExceeded,   ///< a 32-bit index space (sequence ids, arena offsets) is exhausted
 };
 
 [[nodiscard]] const char* to_string(Status status) noexcept;
@@ -60,7 +61,8 @@ class [[nodiscard]] Result {
     if (!ok()) throw BadResultAccess(status_);
     return *value_;
   }
-  [[nodiscard]] T&& value() && {
+  /// By value (not T&&): `for (x : f().value())` must not dangle in C++20.
+  [[nodiscard]] T value() && {
     if (!ok()) throw BadResultAccess(status_);
     return std::move(*value_);
   }

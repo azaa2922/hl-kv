@@ -134,15 +134,6 @@ TEST(DequantPacking, Int4LowNibbleFirst) {
   EXPECT_EQ(out, (std::vector<float>{1, 2, 0, 15, 14}));  // high nibble of byte 2 is padding
 }
 
-TEST(DequantPacking, Int2LsbFirst) {
-  const std::vector<std::byte> packed = bytes({0xE4, 0x1B, 0x03});  // 0b11100100, 0b00011011
-  const std::array<AffineParams, 1> identity{{{1.0f, 0.0f}}};
-  std::vector<float> out(9);
-  ASSERT_EQ(dequantize_reference(QuantFormat::kInt2Packed, packed, 9, identity, 12, out),
-            QuantStatus::kOk);
-  EXPECT_EQ(out, (std::vector<float>{0, 1, 2, 3, 3, 2, 1, 0, 3}));
-}
-
 TEST(DequantPacking, Fp16IsLittleEndian) {
   const std::vector<std::byte> packed = bytes({0x00, 0x3C, 0x00, 0xC0});  // 1.0, -2.0
   std::vector<float> out(2);
@@ -323,12 +314,6 @@ TEST(DequantAccuracy, Int4MinMaxGroups) {
   }
 }
 
-TEST(DequantAccuracy, Int2MinMaxGroups) {
-  for (const std::size_t g : {std::size_t{16}, std::size_t{32}, std::size_t{64}, std::size_t{128}}) {
-    check_int<QuantFormat::kInt2Packed>(g);
-  }
-}
-
 TEST(DequantAccuracy, GroupMinAndMaxAreExactForInt) {
   // bias = min is exact; max = fma(qmax, (max-min)/qmax, min) is within scale/2.
   const std::vector<float> x{-3.0f, 0.1f, 2.5f, 7.0f, 1.0f, 1.0f, 1.0f, 1.0f};
@@ -345,13 +330,11 @@ TEST(DequantAccuracy, EdgeShapes) {
   for (const std::size_t n : {std::size_t{1}, std::size_t{3}, std::size_t{5}, std::size_t{7},
                               std::size_t{33}, std::size_t{129}}) {
     const std::vector<float> x = gaussian(n, 100 + n);
-    for (const QuantFormat f : {QuantFormat::kInt4Packed, QuantFormat::kInt2Packed}) {
-      const std::size_t g = f == QuantFormat::kInt4Packed ? 32 : 64;
-      const RoundTrip rt = round_trip(f, x, g);
-      for (std::size_t i = 0; i < n; ++i) {
-        EXPECT_LE(std::fabs(static_cast<double>(rt.out[i]) - x[i]),
-                  0.5 * rt.params[i / g].scale * (1.0 + 1e-5) + slack(x[i]));
-      }
+    constexpr std::size_t g = 32;
+    const RoundTrip rt = round_trip(QuantFormat::kInt4Packed, x, g);
+    for (std::size_t i = 0; i < n; ++i) {
+      EXPECT_LE(std::fabs(static_cast<double>(rt.out[i]) - x[i]),
+                0.5 * rt.params[i / g].scale * (1.0 + 1e-5) + slack(x[i]));
     }
     const RoundTrip e4 = round_trip(QuantFormat::kFp8E4M3, x, 1);  // per-element scale
     for (std::size_t i = 0; i < n; ++i) {
@@ -383,8 +366,10 @@ TEST(DequantValidation, RejectsBadArguments) {
             QuantStatus::kInvalidArgument);
   EXPECT_EQ(dequantize_reference(QuantFormat::kInt4Packed, packed, 4, one, 3, out),
             QuantStatus::kInvalidArgument);
-  EXPECT_EQ(dequantize_reference(QuantFormat::kInt2Packed, packed, 4, one, 6, out),
-            QuantStatus::kInvalidArgument);
+  // Retired code 4 (formerly INT2) is rejected like any unknown format.
+  EXPECT_EQ(dequantize_reference(static_cast<QuantFormat>(kRetiredInt2Code), packed, 4, one, 4,
+                                 out),
+            QuantStatus::kUnsupportedFormat);
   // Parameter count must match exactly.
   EXPECT_EQ(dequantize_reference(QuantFormat::kInt4Packed, packed, 8, one, 4, out),
             QuantStatus::kInvalidArgument);
@@ -415,8 +400,9 @@ TEST(QuantTypes, TraitsAndSizes) {
   EXPECT_EQ(packed_bytes(QuantFormat::kFp16, 3), 6u);
   EXPECT_EQ(packed_bytes(QuantFormat::kFp8E4M3, 3), 3u);
   EXPECT_EQ(packed_bytes(QuantFormat::kInt4Packed, 3), 2u);
-  EXPECT_EQ(packed_bytes(QuantFormat::kInt2Packed, 5), 2u);
-  EXPECT_EQ(packed_bytes(QuantFormat::kInt2Packed, 8), 2u);
+  EXPECT_EQ(packed_bytes(QuantFormat::kInt4Packed, 4), 2u);
+  EXPECT_EQ(kNumQuantFormats, 4u);
+  EXPECT_FALSE(is_valid(static_cast<QuantFormat>(kRetiredInt2Code)));
   EXPECT_EQ(num_groups(129, 64), 3u);
   EXPECT_EQ(num_groups(0, 64), 0u);
   EXPECT_EQ(elements_per_byte(QuantFormat::kInt4Packed), 2u);

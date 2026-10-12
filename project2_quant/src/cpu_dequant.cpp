@@ -3,6 +3,7 @@
 #include <bit>
 #include <cmath>
 
+#include "hl_quant/cpu_quant.hpp"
 #include "minifloat_spec.hpp"
 
 namespace hl::quant {
@@ -55,8 +56,6 @@ std::uint32_t read_code(QuantFormat f, std::span<const std::byte> packed, std::s
       return std::to_integer<std::uint32_t>(packed[i]);
     case QuantFormat::kInt4Packed:
       return (std::to_integer<std::uint32_t>(packed[i / 2]) >> (4 * (i % 2))) & 0xFu;
-    case QuantFormat::kInt2Packed:
-      return (std::to_integer<std::uint32_t>(packed[i / 4]) >> (2 * (i % 4))) & 0x3u;
   }
   return 0;
 }
@@ -73,44 +72,70 @@ float decode_fp8_e5m2(std::uint8_t bits) noexcept {
   return decode_minifloat(bits, detail::kE5M2Spec);
 }
 
-QuantStatus dequantize_reference(QuantFormat format, std::span<const std::byte> packed,
-                                 std::size_t num_elements, std::span<const AffineParams> params,
-                                 std::size_t group_size, std::span<float> out) noexcept {
+namespace {
+
+QuantStatus check_args(QuantFormat format, std::size_t packed_size, std::size_t num_elements,
+                       std::span<const AffineParams> params, std::size_t group_size) noexcept {
   if (!is_valid(format)) return QuantStatus::kUnsupportedFormat;
   if (num_elements > kMaxElements) return QuantStatus::kInvalidArgument;
   if (!is_valid_group_size(format, group_size)) return QuantStatus::kInvalidArgument;
   if (params.size() != num_groups(num_elements, group_size)) return QuantStatus::kInvalidArgument;
-
   const FormatTraits traits = format_traits(format);
   for (const AffineParams& p : params) {
     if (!std::isfinite(p.scale) || !std::isfinite(p.bias)) return QuantStatus::kInvalidArgument;
     if (!traits.uses_bias && p.bias != 0.0f) return QuantStatus::kInvalidArgument;
   }
-  if (packed.size() < packed_bytes(format, num_elements)) return QuantStatus::kBufferTooSmall;
-  if (out.size() < num_elements) return QuantStatus::kBufferTooSmall;
+  if (packed_size < packed_bytes(format, num_elements)) return QuantStatus::kBufferTooSmall;
+  return QuantStatus::kOk;
+}
 
+// The reference binary32 value of element i (arguments already validated).
+float reference_value(QuantFormat format, std::span<const std::byte> packed, std::size_t i,
+                      std::span<const AffineParams> params, std::size_t group_size) noexcept {
+  const std::uint32_t code = read_code(format, packed, i);
   switch (format) {
     case QuantFormat::kFp16:
-      for (std::size_t i = 0; i < num_elements; ++i) {
-        out[i] = decode_minifloat(read_code(format, packed, i), detail::kFp16Spec);
-      }
-      break;
+      return decode_minifloat(code, detail::kFp16Spec);
     case QuantFormat::kFp8E4M3:
-    case QuantFormat::kFp8E5M2: {
-      const MiniFloatSpec& spec =
-          format == QuantFormat::kFp8E4M3 ? detail::kE4M3Spec : detail::kE5M2Spec;
-      for (std::size_t i = 0; i < num_elements; ++i) {
-        out[i] = decode_minifloat(read_code(format, packed, i), spec) * params[i / group_size].scale;
-      }
-      break;
+      return decode_minifloat(code, detail::kE4M3Spec) * params[i / group_size].scale;
+    case QuantFormat::kFp8E5M2:
+      return decode_minifloat(code, detail::kE5M2Spec) * params[i / group_size].scale;
+    case QuantFormat::kInt4Packed: {
+      const AffineParams& p = params[i / group_size];
+      return std::fma(static_cast<float>(code), p.scale, p.bias);
     }
-    case QuantFormat::kInt4Packed:
-    case QuantFormat::kInt2Packed:
-      for (std::size_t i = 0; i < num_elements; ++i) {
-        const AffineParams& p = params[i / group_size];
-        out[i] = std::fma(static_cast<float>(read_code(format, packed, i)), p.scale, p.bias);
-      }
-      break;
+  }
+  return 0.0f;
+}
+
+}  // namespace
+
+QuantStatus dequantize_reference(QuantFormat format, std::span<const std::byte> packed,
+                                 std::size_t num_elements, std::span<const AffineParams> params,
+                                 std::size_t group_size, std::span<float> out) noexcept {
+  if (const QuantStatus s = check_args(format, packed.size(), num_elements, params, group_size);
+      s != QuantStatus::kOk) {
+    return s;
+  }
+  if (out.size() < num_elements) return QuantStatus::kBufferTooSmall;
+  for (std::size_t i = 0; i < num_elements; ++i) {
+    out[i] = reference_value(format, packed, i, params, group_size);
+  }
+  return QuantStatus::kOk;
+}
+
+QuantStatus dequantize_reference_to_fp16(QuantFormat format, std::span<const std::byte> packed,
+                                         std::size_t num_elements,
+                                         std::span<const AffineParams> params,
+                                         std::size_t group_size,
+                                         std::span<std::uint16_t> out) noexcept {
+  if (const QuantStatus s = check_args(format, packed.size(), num_elements, params, group_size);
+      s != QuantStatus::kOk) {
+    return s;
+  }
+  if (out.size() < num_elements) return QuantStatus::kBufferTooSmall;
+  for (std::size_t i = 0; i < num_elements; ++i) {
+    out[i] = encode_fp16(reference_value(format, packed, i, params, group_size));
   }
   return QuantStatus::kOk;
 }

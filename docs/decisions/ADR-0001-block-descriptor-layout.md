@@ -1,6 +1,7 @@
 # ADR-0001 — Block descriptor layout (HL-KV ABI v0)
 
-Date: 2026-10-11 · Status: accepted for v0, revisit conditions below
+Date: 2026-10-11 · Status: accepted for v0; record layouts kept in v1. The per-step full rebuild was
+replaced by persistent tables with deltas in ADR-0005 (first revisit condition below).
 
 ## Decision
 

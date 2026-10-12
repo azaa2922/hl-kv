@@ -44,37 +44,48 @@ std::uint32_t HomogeneousBlockPool::create_sequence() {
 }
 
 bool HomogeneousBlockPool::append_block(std::uint32_t seq) {
+  alloc::IdArena::Segment& segment = seqs_[seq];
+  if (arena_.reserve(segment, segment.length + 1) != alloc::Status::kOk) return false;
   const std::int32_t id = allocate();
   if (id < 0) return false;
-  seqs_[seq].push_back(id);
+  arena_.push_back(segment, static_cast<std::uint32_t>(id));
   return true;
 }
 
 void HomogeneousBlockPool::release_sequence(std::uint32_t seq) noexcept {
-  for (const std::int32_t id : seqs_[seq]) release(id);
-  seqs_[seq].clear();
+  alloc::IdArena::Segment& segment = seqs_[seq];
+  for (const std::uint32_t id : arena_.view(segment)) release(static_cast<std::int32_t>(id));
+  arena_.release(segment);
   free_seqs_.push_back(seq);
 }
 
 std::size_t HomogeneousBlockPool::sequence_length(std::uint32_t seq) const noexcept {
-  return seqs_[seq].size();
+  return seqs_[seq].length;
 }
 
 void HomogeneousBlockPool::build_block_table(std::span<const std::uint32_t> seqs,
                                              std::vector<std::uint32_t>& indptr,
-                                             std::vector<std::int32_t>& indices) const {
+                                             std::vector<std::uint32_t>& indices) const {
   indptr.clear();
   indices.clear();
   std::size_t total = 0;
-  for (const std::uint32_t s : seqs) total += seqs_[s].size();
+  for (const std::uint32_t s : seqs) total += seqs_[s].length;
   indptr.reserve(seqs.size() + 1);
   indices.reserve(total);
   indptr.push_back(0);
-  // The per-sequence int32 list already is the kernel format: a bulk copy.
+  // Each segment already is the kernel format: a bulk copy.
   for (const std::uint32_t s : seqs) {
-    indices.insert(indices.end(), seqs_[s].begin(), seqs_[s].end());
+    const std::span<const std::uint32_t> ids = arena_.view(seqs_[s]);
+    indices.insert(indices.end(), ids.begin(), ids.end());
     indptr.push_back(static_cast<std::uint32_t>(indices.size()));
   }
+}
+
+void HomogeneousBlockPool::batch_segments(std::span<const std::uint32_t> seqs,
+                                          std::vector<alloc::SequenceSegment>& out) const {
+  out.clear();
+  out.reserve(seqs.size());
+  for (const std::uint32_t s : seqs) out.push_back(alloc::IdArena::kernel_view(seqs_[s]));
 }
 
 }  // namespace hl::bench

@@ -20,7 +20,7 @@ TEST(BlockDescriptorAbi, SizesAndAlignment) {
   EXPECT_EQ(alignof(BlockExecDescriptor), 16u);
   EXPECT_EQ(sizeof(BlockDescriptor), 32u);
   EXPECT_EQ(alignof(BlockDescriptor), 32u);
-  EXPECT_EQ(kAbiVersion, 0u);
+  EXPECT_EQ(kAbiVersion, 1u);
 }
 
 TEST(BlockDescriptorAbi, GoldenInfoWord) {

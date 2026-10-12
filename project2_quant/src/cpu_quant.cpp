@@ -77,9 +77,6 @@ void write_code(QuantFormat f, std::span<std::byte> packed, std::size_t i,
     case QuantFormat::kInt4Packed:
       packed[i / 2] |= static_cast<std::byte>((code & 0xFu) << (4 * (i % 2)));
       break;
-    case QuantFormat::kInt2Packed:
-      packed[i / 4] |= static_cast<std::byte>((code & 0x3u) << (2 * (i % 4)));
-      break;
   }
 }
 
@@ -151,7 +148,7 @@ QuantStatus quantize_reference(QuantFormat format, std::span<const float> in,
         const float y = in[i] / scale;
         write_code(format, packed_out, i, e4m3 ? encode_fp8_e4m3(y) : encode_fp8_e5m2(y));
       }
-    } else {  // INT4 / INT2
+    } else {  // INT4
       const auto [lo_it, hi_it] = std::minmax_element(first, last);
       const float lo = *lo_it;
       const float qmax = static_cast<float>(traits.max_code);

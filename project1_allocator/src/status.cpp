@@ -17,6 +17,7 @@ const char* to_string(Status status) noexcept {
     case Status::kNotDeviceResident: return "not device resident";
     case Status::kRefcountOverflow: return "refcount overflow";
     case Status::kCorrupt: return "corrupt";
+    case Status::kCapacityExceeded: return "capacity exceeded";
   }
   return "unknown status";
 }

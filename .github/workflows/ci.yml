@@ -32,6 +32,26 @@ jobs:
           --benchmark_min_time=0.01s
           --benchmark_filter='/4096$|/64/64$|/64/128$'
 
+  # Builds the CUDA kernels with nvcc and runs the CUDA test binary. GitHub's
+  # runners have no GPU: host-emulation tests run, device tests skip themselves.
+  linux-cuda:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install CUDA 12.6 compiler and runtime headers (no driver)
+        run: |
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build cuda-nvcc-12-6 cuda-cudart-dev-12-6
+          echo "/usr/local/cuda-12.6/bin" >> "$GITHUB_PATH"
+      - name: Configure
+        run: cmake --preset linux-cuda
+      - name: Build
+        run: cmake --build --preset linux-cuda --parallel
+      - name: Test
+        run: ctest --preset linux-cuda
+
   windows-msvc:
     runs-on: windows-2022
     steps:
